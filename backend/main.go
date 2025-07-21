@@ -16,6 +16,7 @@ import (
 )
 
 var linkedinService *services.LinkedInService
+var airtableService *services.AirtableService
 
 func init() {
 	// Load environment variables from .env file
@@ -23,8 +24,9 @@ func init() {
 		log.Println("No .env file found")
 	}
 
-	// Initialize LinkedIn service
+	// Initialize services
 	linkedinService = services.NewLinkedInService()
+	airtableService = services.NewAirtableService()
 }
 
 // enableCORS handles CORS for all requests
@@ -75,23 +77,28 @@ func handleDeveloperSubmission(w http.ResponseWriter, r *http.Request) {
 	// Log received data
 	log.Printf("Received developer submission: %+v", developer)
 
-	// Create newsletter subscriber from developer data
-	subscriber := models.NewsletterSubscriber{
-		Email:     developer.Email,
-		FirstName: developer.FirstName,
-		LastName:  developer.LastName,
-		Source:    "podcast_interview_form",
-		CreatedAt: developer.CreatedAt,
-	}
-
-	// Sync with LinkedIn newsletter (if credentials are available)
-	if os.Getenv("LINKEDIN_ACCESS_TOKEN") != "" {
-		if err := linkedinService.AddSubscriber(subscriber); err != nil {
-			log.Printf("Failed to sync with LinkedIn: %v", err)
-			// Don't fail the request if LinkedIn sync fails
+	// Save to Airtable (if credentials are available)
+	if os.Getenv("AIRTABLE_API_KEY") != "" {
+		if err := airtableService.AddDeveloper(developer); err != nil {
+			log.Printf("Failed to save to Airtable: %v", err)
+			// Don't fail the request if Airtable sync fails
 		}
 	} else {
-		log.Println("LinkedIn credentials not configured, skipping sync")
+		log.Println("Airtable credentials not configured, skipping save")
+	}
+
+	// Optional: Also sync with LinkedIn newsletter (if both services are configured)
+	if os.Getenv("LINKEDIN_ACCESS_TOKEN") != "" {
+		subscriber := models.NewsletterSubscriber{
+			Email:     developer.Email,
+			FirstName: developer.FirstName,
+			LastName:  developer.LastName,
+			Source:    "podcast_interview_form",
+			CreatedAt: developer.CreatedAt,
+		}
+		if err := linkedinService.AddSubscriber(subscriber); err != nil {
+			log.Printf("Failed to sync with LinkedIn: %v", err)
+		}
 	}
 
 	// Respond with success
@@ -116,10 +123,116 @@ func handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleLinkedInAuth generates LinkedIn OAuth URL
+func handleLinkedInAuth(w http.ResponseWriter, r *http.Request) {
+	enableCORS(w, r)
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	redirectURI := "http://localhost:8080/api/linkedin/callback"
+	state := "developer-network-podcast"
+	
+	oauthURL := linkedinService.GetOAuthURL(redirectURI, state)
+	
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"oauth_url": oauthURL,
+		"message":   "Visit this URL to authorize the application",
+	})
+}
+
+// handleLinkedInCallback handles LinkedIn OAuth callback
+func handleLinkedInCallback(w http.ResponseWriter, r *http.Request) {
+	enableCORS(w, r)
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	code := r.URL.Query().Get("code")
+	state := r.URL.Query().Get("state")
+	
+	if code == "" {
+		http.Error(w, "Authorization code not provided", http.StatusBadRequest)
+		return
+	}
+	
+	if state != "developer-network-podcast" {
+		http.Error(w, "Invalid state parameter", http.StatusBadRequest)
+		return
+	}
+	
+	redirectURI := "http://localhost:8080/api/linkedin/callback"
+	accessToken, err := linkedinService.ExchangeCodeForToken(code, redirectURI)
+	if err != nil {
+		log.Printf("Failed to exchange code for token: %v", err)
+		http.Error(w, "Failed to get access token", http.StatusInternalServerError)
+		return
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"access_token": accessToken,
+		"message":      "Add this access token to your .env file as LINKEDIN_ACCESS_TOKEN",
+	})
+}
+
+// handleManualTokenExchange handles manual code-to-token exchange
+func handleManualTokenExchange(w http.ResponseWriter, r *http.Request) {
+	enableCORS(w, r)
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var request struct {
+		Code        string `json:"code"`
+		RedirectURI string `json:"redirect_uri"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "Invalid JSON data", http.StatusBadRequest)
+		return
+	}
+
+	if request.Code == "" {
+		http.Error(w, "Authorization code is required", http.StatusBadRequest)
+		return
+	}
+
+	if request.RedirectURI == "" {
+		request.RedirectURI = "http://localhost:8080/api/linkedin/callback"
+	}
+
+	accessToken, err := linkedinService.ExchangeCodeForToken(request.Code, request.RedirectURI)
+	if err != nil {
+		log.Printf("Failed to exchange code for token: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to get access token: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"access_token": accessToken,
+		"message":      "Add this access token to your .env file as LINKEDIN_ACCESS_TOKEN",
+	})
+}
+
 func main() {
 	// Set up routes
 	http.HandleFunc("/api/developer/submit", handleDeveloperSubmission)
 	http.HandleFunc("/api/health", handleHealthCheck)
+	http.HandleFunc("/api/linkedin/auth", handleLinkedInAuth)
+	http.HandleFunc("/api/linkedin/callback", handleLinkedInCallback)
+	http.HandleFunc("/api/linkedin/exchange", handleManualTokenExchange)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -127,11 +240,18 @@ func main() {
 	}
 
 	fmt.Printf("🚀 Developer Network Backend starting on port %s\n", port)
+	fmt.Printf("🗄 Airtable: %s\n", func() string {
+		if os.Getenv("AIRTABLE_API_KEY") != "" {
+			return "✅ Configured"
+		}
+		return "⚠️  Not configured"
+	}())
+	fmt.Printf("🔗 LinkedIn Client ID: %s\n", os.Getenv("LINKEDIN_CLIENT_ID"))
 	fmt.Printf("📧 Newsletter sync: %s\n", func() string {
 		if os.Getenv("LINKEDIN_ACCESS_TOKEN") != "" {
 			return "✅ LinkedIn configured"
 		}
-		return "⚠️  LinkedIn not configured"
+		return "⚠️  LinkedIn not configured (missing access token)"
 	}())
 
 	log.Fatal(http.ListenAndServe(":"+port, nil))
