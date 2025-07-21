@@ -197,16 +197,35 @@ const SubmitButton = styled.button`
   box-shadow: 0 4px 15px rgba(59, 130, 246, 0.4);
   margin-top: 10px;
   
-  :hover {
+  &:hover {
     transform: translateY(-2px);
     box-shadow: 0 8px 25px rgba(59, 130, 246, 0.5);
   }
   
-  :disabled {
+  &:disabled {
     opacity: 0.6;
     cursor: not-allowed;
     transform: none;
   }
+`;
+
+const StatusMessage = styled.div`
+  padding: 16px 20px;
+  border-radius: 12px;
+  margin-bottom: 20px;
+  font-weight: 500;
+  
+  ${props => props.type === 'success' && `
+    background: rgba(34, 197, 94, 0.1);
+    border: 1px solid rgba(34, 197, 94, 0.3);
+    color: #22c55e;
+  `}
+  
+  ${props => props.type === 'error' && `
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    color: #ef4444;
+  `}
 `;
 
 const BookingForm = () => {
@@ -229,8 +248,40 @@ const BookingForm = () => {
       github: Yup.string().url('Invalid URL').required('Required'),
       howFound: Yup.string().required('Required'),
     }),
-    onSubmit: values => {
-      alert('Form submitted! ' + JSON.stringify(values, null, 2));
+    onSubmit: async (values, { setSubmitting, setStatus }) => {
+      try {
+        setStatus(null);
+        const response = await fetch('http://localhost:8080/api/developer/submit', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            firstName: values.firstName,
+            lastName: values.lastName,
+            email: values.email,
+            github: values.github,
+            howFound: values.howFound,
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error('Failed to submit form');
+        }
+
+        const result = await response.json();
+        setStatus({ type: 'success', message: result.message });
+        // Reset form after successful submission
+        // formik.resetForm();
+      } catch (error) {
+        console.error('Form submission error:', error);
+        setStatus({ 
+          type: 'error', 
+          message: 'Failed to submit form. Please try again.' 
+        });
+      } finally {
+        setSubmitting(false);
+      }
     },
   });
 
@@ -239,6 +290,12 @@ const BookingForm = () => {
       <FormContainer>
         <FormTitle>Book Your Interview</FormTitle>
         <FormSubtitle>Let's get to know you better!</FormSubtitle>
+        
+        {formik.status && (
+          <StatusMessage type={formik.status.type}>
+            {formik.status.message}
+          </StatusMessage>
+        )}
         
         <Form onSubmit={formik.handleSubmit}>
           <InputGroup>
@@ -341,8 +398,8 @@ const BookingForm = () => {
             </IntegrationButtons>
           </IntegrationSection>
 
-          <SubmitButton type="submit" disabled={!formik.isValid}>
-            Book My Interview
+          <SubmitButton type="submit" disabled={!formik.isValid || formik.isSubmitting}>
+            {formik.isSubmitting ? 'Submitting...' : 'Book My Interview'}
           </SubmitButton>
         </Form>
       </FormContainer>
